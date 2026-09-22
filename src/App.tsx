@@ -22,6 +22,10 @@ import {
   Volume2,
   Laptop,
   FileCode,
+  Smartphone,
+  Share2,
+  Info,
+  FolderCheck,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { TitleBar } from './components/TitleBar';
@@ -44,7 +48,25 @@ import {
   formatDuration,
 } from './utils/audioConverter';
 
+// Helper for guaranteed direct browser downloads (fallback on all devices & mobile)
+function triggerBrowserDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 1000);
+}
+
 export default function App() {
+  const isFolderPickerSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
   // Modal State
   const [showFolderModal, setShowFolderModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
@@ -52,9 +74,12 @@ export default function App() {
   // Batch Files State
   const [files, setFiles] = useState<BatchItem[]>([]);
   const [selectedPreviewId, setSelectedPreviewId] = useState<string | null>(null);
-  const [outputDir, setOutputDir] = useState('C:\\Users\\Downloads');
+  const [outputDir, setOutputDir] = useState(
+    isFolderPickerSupported ? '브라우저 기본 다운로드 폴더' : '기기 다운로드 폴더'
+  );
   const [outputDirHandle, setOutputDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const outputDirHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
 
@@ -212,12 +237,52 @@ export default function App() {
     if (dirHandle) {
       setOutputDirHandle(dirHandle);
       outputDirHandleRef.current = dirHandle;
-      setStatusMessage(`저장 대상 폴더가 '${dirHandle.name}'(으)로 지정되었습니다. 변환 완료 시 해당 폴더에 파일이 자동 저장됩니다.`);
+      setStatusMessage(`저장 대상 폴더가 '${dirHandle.name}'(으)로 지정되었습니다. 변환 완료 시 해당 폴더에 파일이 직접 저장됩니다.`);
     } else {
       setOutputDirHandle(null);
       outputDirHandleRef.current = null;
-      setStatusMessage(`저장 대상 경로가 '${newPath}'(으)로 설정되었습니다.`);
+      setStatusMessage(`저장 위치가 '${newPath}'(으)로 설정되었습니다. 변환 시 브라우저 다운로드 폴더로 자동 저장됩니다.`);
     }
+  };
+
+  // Direct folder picker for desktop Chrome/Edge
+  const handlePickFolderDirect = async () => {
+    if (!isFolderPickerSupported) {
+      setShowFolderModal(true);
+      return;
+    }
+    try {
+      const dirHandle = await (window as unknown as {
+        showDirectoryPicker: (opts?: { mode?: string }) => Promise<FileSystemDirectoryHandle>;
+      }).showDirectoryPicker({ mode: 'readwrite' });
+      if (dirHandle) {
+        if ('requestPermission' in dirHandle) {
+          const perm = await (dirHandle as unknown as {
+            requestPermission: (options: { mode: string }) => Promise<string>;
+          }).requestPermission({ mode: 'readwrite' });
+          if (perm !== 'granted') {
+            alert('폴더 쓰기 권한이 허용되지 않았습니다. 기본 다운로드 폴더로 저장됩니다.');
+            return;
+          }
+        }
+        setOutputDir(dirHandle.name);
+        setOutputDirHandle(dirHandle);
+        outputDirHandleRef.current = dirHandle;
+        setStatusMessage(`저장 대상 폴더가 '${dirHandle.name}'(으)로 연결되었습니다. 변환 완료 시 이 폴더에 즉시 저장됩니다.`);
+      }
+    } catch (err: unknown) {
+      const error = err as { name?: string };
+      if (error?.name !== 'AbortError') {
+        setShowFolderModal(true);
+      }
+    }
+  };
+
+  const handleResetToDefaultDownload = () => {
+    setOutputDir(isFolderPickerSupported ? '브라우저 기본 다운로드 폴더' : '기기 다운로드 폴더');
+    setOutputDirHandle(null);
+    outputDirHandleRef.current = null;
+    setStatusMessage('저장 위치가 기본 다운로드 폴더로 설정되었습니다.');
   };
 
   // Execute batch conversion
@@ -231,30 +296,6 @@ export default function App() {
     if (pendingItems.length === 0) {
       setStatusMessage('모든 파일이 이미 변환 완료되었습니다. 재변환하려면 목록을 초기화해 주세요.');
       return;
-    }
-
-    // If user has not yet connected a folder handle, prompt them so files save directly to that folder
-    if (!outputDirHandleRef.current && 'showDirectoryPicker' in window) {
-      try {
-        const ask = confirm(
-          `변환된 MP3 파일을 저장할 컴퓨터의 대상 폴더를 선택하시겠습니까?\n\n'확인'을 누르면 탐색기에서 원하는 저장 폴더를 선택할 수 있으며, 변환 완료 시 해당 폴더에 파일이 직접 저장됩니다.\n('취소'를 누르면 기존 설정대로 변환을 진행합니다)`
-        );
-        if (ask) {
-          const dirHandle = await (window as unknown as {
-            showDirectoryPicker: (opts?: { mode?: string }) => Promise<FileSystemDirectoryHandle>;
-          }).showDirectoryPicker({ mode: 'readwrite' });
-          if (dirHandle) {
-            setOutputDir(dirHandle.name);
-            setOutputDirHandle(dirHandle);
-            outputDirHandleRef.current = dirHandle;
-          }
-        }
-      } catch (err: unknown) {
-        const error = err as { name?: string };
-        if (error?.name !== 'AbortError') {
-          console.warn('Directory picker prompt cancelled or error:', err);
-        }
-      }
     }
 
     setIsConverting(true);
@@ -337,26 +378,48 @@ export default function App() {
           () => cancelRequestedRef.current
         );
 
-        // If target directory handle is active, write directly to user's specified folder!
+        // 1. Direct folder saving on desktop if handle is active
         let savedDirectly = false;
         let savedPathStr = '';
         if (outputDirHandleRef.current) {
           try {
             const handle = outputDirHandleRef.current;
-            const fileHandle = await handle.getFileHandle(item.outputFileName, { create: true });
-            const writable = await (fileHandle as unknown as {
-              createWritable: () => Promise<{
-                write: (data: Blob) => Promise<void>;
-                close: () => Promise<void>;
-              }>;
-            }).createWritable();
-            await writable.write(result.blob);
-            await writable.close();
-            savedDirectly = true;
-            savedPathStr = handle.name;
+            let hasPerm = true;
+            if ('queryPermission' in handle) {
+              const status = await (handle as unknown as {
+                queryPermission: (options: { mode: string }) => Promise<string>;
+              }).queryPermission({ mode: 'readwrite' });
+              if (status !== 'granted' && 'requestPermission' in handle) {
+                const reqStatus = await (handle as unknown as {
+                  requestPermission: (options: { mode: string }) => Promise<string>;
+                }).requestPermission({ mode: 'readwrite' });
+                hasPerm = reqStatus === 'granted';
+              }
+            }
+
+            if (hasPerm) {
+              const fileHandle = await handle.getFileHandle(item.outputFileName, { create: true });
+              const writable = await (fileHandle as unknown as {
+                createWritable: () => Promise<{
+                  write: (data: Blob) => Promise<void>;
+                  close: () => Promise<void>;
+                }>;
+              }).createWritable();
+              await writable.write(result.blob);
+              await writable.close();
+              savedDirectly = true;
+              savedPathStr = handle.name;
+            }
           } catch (writeErr) {
-            console.error('Failed to write directly to target folder handle:', writeErr);
+            console.warn('Direct folder write failed, falling back to browser download:', writeErr);
           }
+        }
+
+        // 2. If direct folder write did not occur, automatically trigger browser download if autoSaveEnabled is true
+        if (!savedDirectly && autoSaveEnabled) {
+          triggerBrowserDownload(result.blob, item.outputFileName);
+          savedDirectly = true;
+          savedPathStr = isFolderPickerSupported ? '다운로드 폴더' : '기기 다운로드 폴더';
         }
 
         completedCount++;
@@ -377,7 +440,7 @@ export default function App() {
 
         if (savedDirectly) {
           setStatusMessage(
-            `[${completedCount}/${totalCount}] 변환 및 '${savedPathStr}' 폴더 저장 완료: ${item.outputFileName}`
+            `[${completedCount}/${totalCount}] 변환 및 '${savedPathStr}' 저장 완료: ${item.outputFileName}`
           );
         }
       } catch (err: unknown) {
@@ -400,10 +463,12 @@ export default function App() {
     if (!cancelRequestedRef.current) {
       if (outputDirHandleRef.current) {
         setStatusMessage(
-          `모든 변환 작업 완료! 총 ${completedCount}개 파일이 지정 폴더('${outputDirHandleRef.current.name}')에 직접 저장되었습니다.`
+          `모든 변환 작업 완료! 총 ${completedCount}개 파일이 '${outputDirHandleRef.current.name}' 폴더에 저장되었습니다.`
         );
       } else {
-        setStatusMessage(`모든 변환 작업 완료! (총 ${completedCount}개 파일 변환됨)`);
+        setStatusMessage(
+          `모든 변환 작업 완료! 총 ${completedCount}개 파일이 다운로드 폴더에 안전하게 저장되었습니다.`
+        );
       }
     }
   };
@@ -411,6 +476,23 @@ export default function App() {
   const handleCancelConversion = () => {
     cancelRequestedRef.current = true;
     setStatusMessage('변환 중지 요청됨...');
+  };
+
+  const handleShareSingle = async (item: BatchItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (!item.result || !navigator.share) return;
+    try {
+      const file = new File([item.result.blob], item.outputFileName, { type: 'audio/mpeg' });
+      await navigator.share({
+        files: [file],
+        title: item.outputFileName,
+      });
+    } catch (err: unknown) {
+      const error = err as { name?: string };
+      if (error?.name !== 'AbortError') {
+        handleDownloadSingle(item);
+      }
+    }
   };
 
   const handleDownloadSingle = async (item: BatchItem, e?: React.MouseEvent) => {
@@ -750,17 +832,29 @@ export default function App() {
                             <div className="flex items-center gap-1.5">
                               <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 font-medium flex items-center gap-1">
                                 <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                {item.savedToFolder ? '저장 완료' : '완료'} ({formatBytes(item.result?.size || 0)})
+                                <span>{item.savedPath ? `${item.savedPath} 저장됨` : '완료'}</span>
+                                <span className="text-emerald-600">({formatBytes(item.result?.size || 0)})</span>
                               </span>
                               <button
                                 type="button"
                                 onClick={(e) => handleDownloadSingle(item, e)}
                                 className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-medium flex items-center gap-1 shadow-2xs cursor-pointer"
-                                title={item.savedToFolder ? '지정 폴더에 다시 저장' : 'MP3 저장'}
+                                title="MP3 다시 저장 / 다운로드"
                               >
                                 <Download className="w-2.5 h-2.5" />
                                 <span>저장</span>
                               </button>
+                              {canShare && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleShareSingle(item, e)}
+                                  className="px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-medium flex items-center gap-1 shadow-2xs cursor-pointer"
+                                  title="기기 공유 / 카카오톡 전송"
+                                >
+                                  <Share2 className="w-2.5 h-2.5" />
+                                  <span>공유</span>
+                                </button>
+                              )}
                             </div>
                           )}
                           {item.status === 'error' && (
@@ -938,43 +1032,122 @@ export default function App() {
               <span>3. 저장 경로 및 출력 설정 (Output Settings)</span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
               <div>
-                <label className="block text-slate-700 font-medium mb-1">
-                  저장 대상 폴더:
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    id="input-output-dir"
-                    type="text"
-                    value={outputDir}
-                    onChange={(e) => setOutputDir(e.target.value)}
-                    className="w-full bg-[#f8fafc] border border-slate-300 rounded px-2.5 py-1 text-slate-800 font-mono text-[11px] focus:bg-white focus:outline-blue-500"
-                  />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-slate-700 font-medium text-xs flex items-center gap-1.5">
+                    {isFolderPickerSupported ? (
+                      <Laptop className="w-3.5 h-3.5 text-slate-500" />
+                    ) : (
+                      <Smartphone className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                    <span>저장 위치 설정:</span>
+                  </label>
                   <button
-                    id="btn-select-dir"
                     type="button"
                     onClick={() => setShowFolderModal(true)}
-                    className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded text-slate-700 font-medium whitespace-nowrap shadow-2xs cursor-pointer"
+                    className="text-[11px] text-blue-600 hover:text-blue-800 underline font-medium cursor-pointer"
                   >
-                    경로 선택...
+                    상세 안내 및 옵션
                   </button>
                 </div>
-                {outputDirHandle ? (
-                  <div className="flex items-center gap-1.5 text-[11px] text-emerald-700 font-medium mt-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span>지정 폴더 직접 저장 활성화됨 ('{outputDirHandle.name}')</span>
+
+                {isFolderPickerSupported ? (
+                  /* Desktop with Folder Picker support */
+                  <div>
+                    {outputDirHandle ? (
+                      <div className="bg-emerald-50 border border-emerald-300 rounded p-2 text-xs flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 font-bold text-emerald-900">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                            <span>지정 폴더 직접 저장 활성화됨</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleResetToDefaultDownload}
+                            className="text-[10px] text-slate-500 hover:text-red-600 underline cursor-pointer"
+                          >
+                            해제 (기본 다운로드로)
+                          </button>
+                        </div>
+                        <div className="font-mono text-emerald-800 bg-white/80 px-2 py-1 rounded border border-emerald-200 truncate">
+                          📁 {outputDirHandle.name}
+                        </div>
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
+                          <span className="text-[10px] text-emerald-700">
+                            * 변환 시 이 컴퓨터 폴더에 파일이 즉시 생성됩니다.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handlePickFolderDirect}
+                            className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-medium shrink-0 cursor-pointer shadow-2xs"
+                          >
+                            폴더 변경...
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-slate-50 border border-slate-300 rounded p-2 text-xs flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-slate-700 font-medium">
+                            <Download className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                            <span>브라우저 기본 <strong>다운로드</strong> 폴더</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handlePickFolderDirect}
+                            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-bold cursor-pointer shadow-2xs flex items-center gap-1"
+                          >
+                            <FolderOpen className="w-3 h-3" />
+                            <span>내 컴퓨터 폴더 직접 지정...</span>
+                          </button>
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          * '내 컴퓨터 폴더 직접 지정'을 누르면 원하는 폴더로 변환 즉시 자동 저장됩니다.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <div className="text-[10px] text-slate-500 mt-1">
-                    * '경로 선택...'을 눌러 컴퓨터 폴더를 선택하면 변환 완료 시 해당 폴더로 직접 저장됩니다.
+                  /* Mobile / Tablet / Non-Chromium */
+                  <div className="bg-blue-50/70 border border-blue-200 rounded p-2 text-xs flex flex-col gap-1">
+                    <div className="flex items-center gap-1.5 font-bold text-blue-900">
+                      <Smartphone className="w-4 h-4 text-blue-600 shrink-0" />
+                      <span>모바일/태블릿 기기 기본 [다운로드] 폴더</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      모바일 보안 정책상 변환된 파일은 기기의 <strong>[다운로드]</strong> 폴더(파일 앱)로 안전하게 자동 저장됩니다.
+                    </p>
                   </div>
                 )}
+
+                {/* Auto-save toggle */}
+                <div className="flex items-center gap-2 mt-2 pt-1 border-t border-slate-100">
+                  <input
+                    type="checkbox"
+                    id="checkbox-auto-save"
+                    checked={autoSaveEnabled}
+                    onChange={(e) => setAutoSaveEnabled(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                  />
+                  <label
+                    htmlFor="checkbox-auto-save"
+                    className="text-[11px] text-slate-700 font-medium cursor-pointer"
+                  >
+                    변환 완료 시 파일 즉시 자동 저장 (권장)
+                  </label>
+                </div>
               </div>
 
-              <div className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded border border-slate-200">
-                <div className="font-semibold text-slate-700 mb-0.5">파일 일괄 저장 규칙</div>
-                <div>각 파일은 원래 파일명 그대로 <span className="font-mono font-medium text-blue-700">[파일명].mp3</span>로 변환 저장됩니다.</div>
+              <div className="text-[11px] text-slate-600 bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1.5">
+                <div className="font-semibold text-slate-700 flex items-center gap-1">
+                  <Info className="w-3.5 h-3.5 text-blue-600" />
+                  <span>기기별 파일 저장 원리</span>
+                </div>
+                <div className="text-slate-600 text-[10px] leading-relaxed">
+                  • <strong>컴퓨터 (Chrome / Edge)</strong>: '내 컴퓨터 폴더 직접 지정'을 통해 원하는 디렉토리에 변환 파일을 바로 저장할 수 있습니다.<br />
+                  • <strong>모바일 (iOS / Android)</strong>: 기기 보안 정책에 의해 임의 경로 지정이 차단되어 있으므로, [다운로드] 폴더로 자동 저장되거나 [공유] 버튼으로 카카오톡/파일 앱에 전송할 수 있습니다.
+                </div>
               </div>
             </div>
           </div>
