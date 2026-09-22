@@ -1,0 +1,6 @@
+{
+  "name": "WAV to MP3 Converter",
+  "description": "Vercel 웹 배포에 최적화된 고성능 WAV to MP3 일괄 변환기 (VBR/CBR 옵션, 파형 미리듣기 및 100% 브라우저 로컬 변환)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

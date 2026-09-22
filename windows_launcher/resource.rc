@@ -1,0 +1,3 @@
+#define RT_MANIFEST 24
+1 RT_MANIFEST "windows_launcher/manifest.xml"
+101 10 "public/WavToMp3Converter.html"
